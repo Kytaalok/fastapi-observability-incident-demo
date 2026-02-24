@@ -1,0 +1,33 @@
+groups:
+  - name: app-alerts
+    rules:
+      - alert: High5xxRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="app",status=~"5.."}[2m]))
+            /
+            clamp_min(sum(rate(http_requests_total{job="app"}[2m])), 0.001)
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: warning
+          service: app
+        annotations:
+          summary: "High 5xx rate on app"
+          description: "5xx ratio is above 5% for the last 2 minutes."
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(http_request_duration_seconds_bucket{job="app"}[5m])
+            )
+          ) > 1.0
+        for: 2m
+        labels:
+          severity: warning
+          service: app
+        annotations:
+          summary: "High latency p95 on app"
+          description: "p95 latency is above 1 second for the last 5 minutes."
