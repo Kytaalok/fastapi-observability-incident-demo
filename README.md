@@ -1,29 +1,29 @@
-﻿# Observability + Incident Demo (Prometheus + Grafana + Loki)
+# Observability + Incident Demo (Prometheus + Grafana + Loki)
 
-Демо-проект на FastAPI в стиле DevOps/SRE: метрики, логи, алерты и минимальный `runbook` для разбора инцидента.
+Демо-проект на FastAPI в стиле DevOps/SRE: метрики, структурированные JSON-логи, алерты и `RUNBOOK.md` для разбора инцидента.
 
 ## Что в проекте
 
 - FastAPI-сервис с эндпоинтами `/health`, `/metrics`, `/slow`, `/error`
-- Prometheus (`scrape` + `alert rules`)
-- Grafana (готовый dashboard JSON)
-- Loki + Promtail (сбор логов приложения)
-- `RUNBOOK.md` с шагами triage/диагностики
+- Structured JSON logging с фильтрацией по полям в Loki
+- Prometheus (`scrape` + `alert rules`: `High5xxRate`, `HighLatencyP95`)
+- Grafana (dashboard с 5 панелями: RPS, 5xx ratio, latency p95/p99, логи, ошибки)
+- Loki + Promtail (сбор и парсинг JSON-логов, label `level` для индексной фильтрации)
+- `RUNBOOK.md` с шагами triage/диагностики и готовыми LogQL-запросами
 
 ## Архитектура
 
-`Docker Compose -> FastAPI (/metrics, /slow, /error) -> Prometheus (scrape + alerts) -> Grafana dashboard`
-
-`Docker Compose -> Promtail -> Loki -> Grafana Logs`
+```
+Docker Compose -> FastAPI (/metrics, /slow, /error) -> Prometheus (scrape + alerts) -> Grafana dashboard
+Docker Compose -> FastAPI (JSON logs) -> Promtail (pipeline: json → labels) -> Loki -> Grafana Logs
+```
 
 ## Стек
 
-- FastAPI
-- `prometheus-client`
-- Prometheus
-- Grafana
-- Loki
-- Promtail
+- FastAPI + `prometheus-client`
+- Prometheus v2.51.2
+- Grafana v10.4.3
+- Loki v2.9.8 + Promtail v2.9.8
 - Docker / Docker Compose
 
 ## Быстрый старт
@@ -41,7 +41,7 @@ docker compose up --build
 - Prometheus: `http://localhost:9090`
 - Prometheus Alerts: `http://localhost:9090/alerts`
 - Grafana: `http://localhost:3000` (`admin` / `admin`)
-- Loki Ready (опционально): `http://localhost:3100/ready`
+- Loki Ready: `http://localhost:3100/ready`
 
 ## Сценарий Демо Инцидента
 
@@ -49,87 +49,97 @@ docker compose up --build
 2. Дай немного обычного трафика:
 
 ```bash
-curl.exe http://localhost:8000/health
+curl http://localhost:8000/
 ```
 
 3. Сгенерируй 5xx (повтори несколько раз):
 
 ```bash
-curl.exe http://localhost:8000/error
+curl http://localhost:8000/error
+curl 'http://localhost:8000/error?code=503'
 ```
 
 4. Сгенерируй высокую задержку:
 
 ```bash
-curl.exe "http://localhost:8000/slow?delay=2"
+curl "http://localhost:8000/slow?delay=3"
 ```
 
 5. Проверь:
 
-- алерты в Prometheus UI
+- алерты в Prometheus UI (`http://localhost:9090/alerts`)
 - панели Grafana (`RPS`, `5xx ratio`, `p95/p99`)
-- логи в Loki (панель `Application Logs`)
+- логи в панели `Application Logs` — JSON с полями `method`, `path`, `status`, `duration_ms`
+- ошибки в панели `Errors & Warnings` — только `level=ERROR` и `level=WARNING`
 - шаги разбора в `RUNBOOK.md`
 
-## Что Делает `docker compose up --build`
+## Логирование
 
-- Собирает контейнер FastAPI-приложения из `app/Dockerfile`
-- Поднимает сервис приложения (`app`) с логированием в файл
-- Поднимает Prometheus и загружает `prometheus/prometheus.yml` + `prometheus/alerts.yml`
-- Поднимает Loki и Promtail для сбора логов приложения
-- Поднимает Grafana и автоматически подключает datasource'ы (Prometheus, Loki)
-- Автоматически импортирует dashboard `grafana/dashboards/observability.json`
+Приложение пишет JSON-логи:
+
+```json
+{"timestamp": "2026-02-24T23:05:37.676Z", "level": "INFO", "logger": "obs-demo", "event": "request", "method": "GET", "path": "/slow", "status": "200", "duration_ms": 106.18}
+```
+
+Promtail извлекает `level` как Loki label. Остальные поля парсятся через LogQL `| json`.
+
+Примеры LogQL-запросов:
+
+```
+{job="app"} | json                                          # все логи с парсингом полей
+{job="app", level="ERROR"} | json                           # только ошибки
+{job="app", level="WARNING"} | json | event="slow_endpoint" # медленные запросы
+{job="app"} | json | duration_ms > 1000                     # запросы дольше 1 секунды
+```
+
+## Метрики
+
+- `http_requests_total` (Counter) — method, path, status
+- `http_request_duration_seconds` (Histogram) — бакеты до 20s
+- `http_inflight_requests` (Gauge) — текущие запросы
+
+Эндпоинты `/metrics` и `/health` исключены из инструментирования.
+Неизвестные пути нормализуются в `/unknown` для защиты от высокой кардинальности.
+
+## Алерты Prometheus
+
+| Алерт | Условие | Длительность |
+|-------|---------|--------------|
+| `High5xxRate` | 5xx ratio > 5% | 1 минута |
+| `HighLatencyP95` | p95 latency > 1s | 2 минуты |
 
 ## Управление
 
 ```bash
-docker compose up -d
-docker compose down
-docker compose ps
-docker compose logs -f app
-docker compose restart app
+docker compose up -d          # запуск в фоне
+docker compose down           # остановка
+docker compose ps             # статус контейнеров
+docker compose logs -f app    # логи приложения
+docker compose restart app    # перезапуск приложения
 ```
 
-## Проверки И Отладка
-
-Проверка эндпоинтов приложения:
+## Проверки и отладка
 
 ```bash
-curl.exe http://localhost:8000/health
-curl.exe http://localhost:8000/metrics
-curl.exe http://localhost:8000/error
-curl.exe "http://localhost:8000/slow?delay=2"
+curl http://localhost:8000/health                  # health check
+curl http://localhost:8000/metrics                  # метрики Prometheus
+curl http://localhost:8000/error                    # синтетическая ошибка 500
+curl 'http://localhost:8000/error?code=503'         # синтетическая ошибка 503
+curl "http://localhost:8000/slow?delay=3"           # задержка 3 секунды
+curl http://localhost:3100/ready                    # готовность Loki
 ```
 
-Проверка таргетов Prometheus:
+Таргеты Prometheus: `http://localhost:9090/targets`
 
-- `http://localhost:9090/targets`
-
-Проверка алертов:
-
-- `http://localhost:9090/alerts`
-
-Проверка логов приложения через Docker:
-
-```bash
-docker compose logs -f app
-```
-
-Проверка готовности Loki:
-
-```bash
-curl.exe http://localhost:3100/ready
-```
-
-## Структура Проекта
+## Структура проекта
 
 ```text
 .
 |-- docker-compose.yml
 |-- Vagrantfile
-|-- .gitignore
 |-- README.md
 |-- RUNBOOK.md
+|-- UPDATE.md
 |-- app
 |   |-- Dockerfile
 |   |-- requirements.txt

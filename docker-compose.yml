@@ -4,7 +4,6 @@ services:
       context: ./app
     container_name: obs-app
     environment:
-      PYTHONUNBUFFERED: "1"
       APP_LOG_FILE: /var/log/app/app.log
     ports:
       - "8000:8000"

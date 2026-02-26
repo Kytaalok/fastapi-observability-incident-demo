@@ -16,3 +16,9 @@ scrape_configs:
           job: app
           service: fastapi
           __path__: /var/log/app/*.log
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+      - labels:
+          level:
